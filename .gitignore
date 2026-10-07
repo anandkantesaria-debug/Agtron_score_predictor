@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# CatBoost training logs
+catboost_info/
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
