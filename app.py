@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from catboost import CatBoostRegressor
 st.set_page_config(
-    page_title="Coffee Roast Predictor",
+    page_title="Coffee Color Predictor",
     page_icon="☕",
     layout="wide"
 )
