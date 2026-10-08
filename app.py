@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from catboost import CatBoostRegressor
+st.write("testingABC")
 st.set_page_config(
     page_title="Coffee Color Predictor",
     page_icon="☕",
