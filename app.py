@@ -48,7 +48,7 @@ st.markdown("""
 # TITLE
 # ==========================================
 
-st.title("☕ Coffee Coffee Predictor")
+st.title("☕ Coffee Color Predictor")
 
 st.markdown(
     "Enter roast settings and press **PREDICT**."
