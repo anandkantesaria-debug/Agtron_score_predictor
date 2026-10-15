@@ -11,3 +11,23 @@ catboost_info/
 # Windows
 Thumbs.db
 Desktop.ini
+
+# Training script
+Catboost_train.py
+
+# Data files
+*.csv
+*.xlsx
+*.xls
+
+# MLflow
+mlartifacts/
+mlflow.db
+mlruns/
+
+# Python
+__pycache__/
+*.pyc
+
+# CatBoost
+catboost_info/
