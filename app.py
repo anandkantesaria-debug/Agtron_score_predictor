@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 from catboost import CatBoostRegressor
 import mlflow
-mlflow.set_tracking_uri("http://127.0.0.1:5000")
-st.write("testingABC")
+# mlflow.set_tracking_uri("http://127.0.0.1:5000")
+
 st.set_page_config(
     page_title="Coffee Color Predictor",
     page_icon="☕",
@@ -14,7 +14,9 @@ st.set_page_config(
 
 @st.cache_resource
 def load_model():
-    return mlflow.catboost.load_model("models:/AgtronModel@champion")
+    model = CatBoostRegressor()
+    return model.load_model("models/agtron_model.cbm")
+# mlflow.catboost.load_model("models:/AgtronModel@champion")
 # LOAD MODELS
 try:
     agtron_model = load_model()
