@@ -13,17 +13,13 @@ Thumbs.db
 Desktop.ini
 
 # Training script
-Catboost_train.py
+
 
 # Data files
-*.csv
-*.xlsx
-*.xls
+
 
 # MLflow
-mlartifacts/
-mlflow.db
-mlruns/
+
 
 # Python
 __pycache__/
