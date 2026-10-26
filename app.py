@@ -1,10 +1,6 @@
 import streamlit as st
-import mlflow.catboost
 import pandas as pd
-import numpy as np
 from catboost import CatBoostRegressor
-import mlflow
-# mlflow.set_tracking_uri("http://127.0.0.1:5000")
 
 st.set_page_config(
     page_title="Coffee Color Predictor",
@@ -16,7 +12,16 @@ st.set_page_config(
 def load_model():
     model = CatBoostRegressor()
     return model.load_model("models/agtron_model.cbm")
-# mlflow.catboost.load_model("models:/AgtronModel@champion")
+
+
+def clean_blend_input(blend_val):
+    """Normalize blend input to clean string format (e.g. '284.0' or ' 284 ' -> '284')."""
+    try:
+        cleaned = str(blend_val).strip()
+        return str(int(float(cleaned)))
+    except (ValueError, TypeError):
+        return None
+
 # LOAD MODELS
 try:
     agtron_model = load_model()
@@ -128,12 +133,11 @@ with tab1:
     # PREDICTION
 
     if predict_button:
-        try:
-            cleaned_blend = str(blend).strip()
-            blend = str(int(float(cleaned_blend)))
-        except (ValueError, TypeError):
+        cleaned_blend = clean_blend_input(blend)
+        if cleaned_blend is None:
             st.error("Invalid input format detected for 'Blend'. Please enter a valid number.")
             st.stop()
+        blend = cleaned_blend
 
 
         #st.write("Selected Blend:", blend)
@@ -156,8 +160,6 @@ with tab1:
 
         st.divider()
 
-        res1 = st.columns(1)
-
         st.metric(
             "Predicted Agtron",
             f"{agtron_prediction:.1f}"
@@ -165,29 +167,87 @@ with tab1:
 with tab2:
 
     st.header("Roast Recommendation")
+    st.markdown("Enter target color and roast parameters to find optimal temperature and quench adjustments.")
 
-    target_agtron = st.number_input(
-        "Target Agtron",
-        min_value=15.0,
-        max_value=65.0,
-        value=45.0,
-        step=0.1
-    )
+    rec_col1, rec_col2 = st.columns(2)
 
-    st.write(f"Target Agtron: {target_agtron}")
+    with rec_col1:
+        rec_month = st.selectbox(
+            "Month ",
+            [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9",
+                "10",
+                "11",
+                "12"
+            ],
+            key="rec_month"
+        )
+
+        rec_blend = st.text_input(
+            "Blend ",
+            value="284",
+            key="rec_blend"
+        )
+
+        rec_consumed = st.number_input(
+            "Consumed Weight (lb) ",
+            min_value=0.0,
+            value=500.0,
+            step=1.0,
+            key="rec_consumed"
+        )
+
+    with rec_col2:
+        rec_temp = st.number_input(
+            "Roast Temperature (°F) ",
+            min_value=300.0,
+            value=440.0,
+            step=1.0,
+            key="rec_temp"
+        )
+
+        rec_quench = st.number_input(
+            "Quench Applied (lb) ",
+            min_value=0.0,
+            value=73.0,
+            step=1.0,
+            key="rec_quench"
+        )
+
+        target_agtron = st.number_input(
+            "Target Agtron",
+            min_value=15.0,
+            max_value=65.0,
+            value=45.0,
+            step=0.1,
+            key="rec_target_agtron"
+        )
 
     recommend_button = st.button(
         "Recommend Settings"
     )
     if recommend_button:
+        cleaned_blend = clean_blend_input(rec_blend)
+        if cleaned_blend is None:
+            st.error("Invalid input format detected for 'Blend'. Please enter a valid number.")
+            st.stop()
+        rec_blend = cleaned_blend
 
         input_data = pd.DataFrame({
-                    "Consumed": [consumed],
-                    "Temp": [temp],
-                    "Quench": [quench],
-                    "Month": [str(month)],
-                    "Blend": [blend]        
-                })
+            "Consumed": [rec_consumed],
+            "Temp": [rec_temp],
+            "Quench": [rec_quench],
+            "Month": [str(rec_month)],
+            "Blend": [rec_blend]        
+        })
 
 
         current_prediction = float(agtron_model.predict(input_data)[0])
@@ -202,56 +262,44 @@ with tab2:
             f"Gap to Target: {difference:.1f}"
         )
 
-        best_temp = temp
-        best_quench = quench
+        # Vectorized candidate evaluation (keeping existing search ranges)
+        temp_changes = list(range(-11, 10))
+        quench_changes = list(range(-6, 5))
 
-        best_prediction = current_prediction
+        grid = [
+            (rec_temp + tc, rec_quench + qc)
+            for tc in temp_changes
+            for qc in quench_changes
+        ]
+        candidate_temps, candidate_quenches = zip(*grid)
+        n_candidates = len(grid)
 
-        best_error = abs(target_agtron - current_prediction)
-        recommendations = []
+        candidate_df = pd.DataFrame({
+            "Consumed": [rec_consumed] * n_candidates,
+            "Temp": candidate_temps,
+            "Quench": candidate_quenches,
+            "Month": [str(rec_month)] * n_candidates,
+            "Blend": [rec_blend] * n_candidates
+        })
 
-        
-        # recommended_temp = temp
-        # recommended_quench = quench
+        candidate_predictions = agtron_model.predict(candidate_df)
+        candidate_errors = [abs(target_agtron - pred) for pred in candidate_predictions]
 
-        for temp_change in range(-11, 10):
+        recommendation_df = pd.DataFrame({
+            "Temp": candidate_temps,
+            "Quench": candidate_quenches,
+            "Expected Agtron": [round(float(p), 1) for p in candidate_predictions],
+            "Error": [round(float(e), 1) for e in candidate_errors]
+        })
 
-            for quench_change in range(-6, 5):
+        recommendation_df = recommendation_df.sort_values("Error").reset_index(drop=True)
+        best_row = recommendation_df.iloc[0]
 
-                candidate_df = input_data.copy()
+        best_temp = best_row["Temp"]
+        best_quench = best_row["Quench"]
+        best_prediction = best_row["Expected Agtron"]
+        best_error = best_row["Error"]
 
-                candidate_df["Temp"] = temp + temp_change
-                candidate_df["Quench"] = quench + quench_change
-
-                candidate_prediction = agtron_model.predict(candidate_df)[0]
-
-                candidate_error = abs(target_agtron - candidate_prediction)
-                recommendations.append({
-                        "Temp": temp + temp_change,
-                        "Quench": quench + quench_change,
-                        "Expected Agtron": round(candidate_prediction, 1),
-                        "Error": round(candidate_error, 1)
-                })
-
-                if candidate_error < best_error:
-
-                    best_error = candidate_error
-
-                    best_prediction = candidate_prediction
-
-
-                    best_temp = temp + temp_change
-                    best_quench = quench + quench_change
-
-        # if difference > 0:
-        #     recommended_temp += 2
-        #     recommended_quench += 5
-
-        # elif difference < 0:
-        #     recommended_temp -= 2
-        #     recommended_quench -= 5
-        recommendation_df = pd.DataFrame(recommendations)
-        recommendation_df = recommendation_df.sort_values("Error")
         st.subheader("Optimized Recommendation")
 
         st.write(f"Recommended Temp: {best_temp}")
@@ -268,21 +316,3 @@ with tab2:
             recommendation_df.head(5),
             use_container_width=True
         )
-        
-        # st.subheader("Recommended Changes")
-
-        # st.write(f"Recommended Temp: {recommended_temp}")
-
-        # st.write(
-        #     f"Recommended Time: {recommended_quench}"
-        # )
-
-        # recommended_df = input_data.copy()
-        # recommended_df["Temp"] = recommended_temp
-        # recommended_df["Quench"] = recommended_quench
-
-        # recommended_prediction = agtron_model.predict(recommended_df)[0]
-
-        # st.subheader("Expected Result")
-
-        # st.success(f"Expected Agtron: {recommended_prediction:.1f}")

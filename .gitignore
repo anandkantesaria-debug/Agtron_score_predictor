@@ -1,29 +1,40 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
 
 # CatBoost training logs
 catboost_info/
 
-# VS Code
+# MLflow run tracking and artifacts
+mlruns/
+mlartifacts/
+mlflow.db
+mlflow.db.wal
+
+# Large datasets & raw data dumps
+*.csv
+*.tsv
+*.parquet
+Data_time_moisture.csv
+
+# Temporary model files
+*.tmp
+
+# VS Code / IDE
 .vscode/
+.idea/
 
 # Windows
 Thumbs.db
 Desktop.ini
-
-# Training script
-
-
-# Data files
-
-
-# MLflow
-
-
-# Python
-__pycache__/
-*.pyc
-
-# CatBoost
-catboost_info/
