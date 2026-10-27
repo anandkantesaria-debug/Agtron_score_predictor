@@ -1,12 +1,17 @@
+import os
+import httpx
 import streamlit as st
 import pandas as pd
 from catboost import CatBoostRegressor
+
+API_URL = os.getenv("API_URL", "").rstrip("/")
 
 st.set_page_config(
     page_title="Coffee Color Predictor",
     page_icon="☕",
     layout="wide"
 )
+
 
 @st.cache_resource
 def load_model():
@@ -22,12 +27,16 @@ def clean_blend_input(blend_val):
     except (ValueError, TypeError):
         return None
 
-# LOAD MODELS
-try:
-    agtron_model = load_model()
-except Exception as e:
-    st.error(f"Critical Error: Failed to load machine learning models. Details: {e}")
-    st.stop()
+
+# LOAD MODEL (only required when not delegating to the FastAPI backend)
+agtron_model = None
+if not API_URL:
+    try:
+        agtron_model = load_model()
+    except Exception as e:
+        st.error(f"Critical Error: Failed to load machine learning models. Details: {e}")
+        st.stop()
+
 # CUSTOM CSS
 st.markdown("""
 <style>
@@ -74,7 +83,7 @@ with tab1:
     st.markdown(
         "Enter roast settings and press **PREDICT**."
     )
-# INPUTS
+    # INPUTS
     col1, col2 = st.columns(2)
 
     with col1:
@@ -129,9 +138,7 @@ with tab1:
         "PREDICT"
     )
 
-
     # PREDICTION
-
     if predict_button:
         cleaned_blend = clean_blend_input(blend)
         if cleaned_blend is None:
@@ -139,24 +146,40 @@ with tab1:
             st.stop()
         blend = cleaned_blend
 
+        if API_URL:
+            try:
+                resp = httpx.post(
+                    f"{API_URL}/predict",
+                    json={
+                        "Consumed": consumed,
+                        "Temp": temp,
+                        "Quench": quench,
+                        "Month": str(month),
+                        "Blend": blend,
+                    },
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    st.error(f"API error ({resp.status_code}): {resp.text}")
+                    st.stop()
+                agtron_prediction = float(resp.json()["predicted_agtron"])
+            except Exception as e:
+                st.error(f"Failed to reach prediction API at {API_URL}: {e}")
+                st.stop()
+        else:
+            input_data = pd.DataFrame({
+                "Consumed": [consumed],
+                "Temp": [temp],
+                "Quench": [quench],
+                "Month": [str(month)],
+                "Blend": [blend]
+            })
 
-        #st.write("Selected Blend:", blend)
-
-        
-        input_data = pd.DataFrame({
-            "Consumed": [consumed],
-            "Temp": [temp],
-            "Quench": [quench],
-            "Month": [str(month)],
-            "Blend": [blend]        
-        })
-
-        try:
-            agtron_prediction = float(agtron_model.predict(input_data)[0])
-        except Exception as e:
-            st.error(f"Prediction calculation failed: {e}")
-            st.stop()
-
+            try:
+                agtron_prediction = float(agtron_model.predict(input_data)[0])
+            except Exception as e:
+                st.error(f"Prediction calculation failed: {e}")
+                st.stop()
 
         st.divider()
 
@@ -164,6 +187,7 @@ with tab1:
             "Predicted Agtron",
             f"{agtron_prediction:.1f}"
         )
+
 with tab2:
 
     st.header("Roast Recommendation")
@@ -241,64 +265,101 @@ with tab2:
             st.stop()
         rec_blend = cleaned_blend
 
-        input_data = pd.DataFrame({
-            "Consumed": [rec_consumed],
-            "Temp": [rec_temp],
-            "Quench": [rec_quench],
-            "Month": [str(rec_month)],
-            "Blend": [rec_blend]        
-        })
+        if API_URL:
+            try:
+                resp = httpx.post(
+                    f"{API_URL}/recommend",
+                    json={
+                        "Consumed": rec_consumed,
+                        "Temp": rec_temp,
+                        "Quench": rec_quench,
+                        "Month": str(rec_month),
+                        "Blend": rec_blend,
+                        "target_agtron": target_agtron,
+                    },
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    st.error(f"API error ({resp.status_code}): {resp.text}")
+                    st.stop()
+                rec_data = resp.json()
+                current_prediction = float(rec_data["current_predicted_agtron"])
+                difference = float(rec_data["gap_to_target"])
+                best_temp = float(rec_data["recommended_temp"])
+                best_quench = float(rec_data["recommended_quench"])
+                best_prediction = float(rec_data["expected_agtron"])
+                best_error = float(rec_data["distance_from_target"])
+                top_df = pd.DataFrame([
+                    {
+                        "Temp": item["temp"],
+                        "Quench": item["quench"],
+                        "Expected Agtron": item["expected_agtron"],
+                        "Error": item["error"],
+                    }
+                    for item in rec_data["top_recommendations"]
+                ])
+            except Exception as e:
+                st.error(f"Failed to reach recommendation API at {API_URL}: {e}")
+                st.stop()
+        else:
+            input_data = pd.DataFrame({
+                "Consumed": [rec_consumed],
+                "Temp": [rec_temp],
+                "Quench": [rec_quench],
+                "Month": [str(rec_month)],
+                "Blend": [rec_blend]
+            })
 
+            current_prediction = float(agtron_model.predict(input_data)[0])
+            difference = target_agtron - current_prediction
 
-        current_prediction = float(agtron_model.predict(input_data)[0])
+            # Vectorized candidate evaluation (keeping existing search ranges)
+            temp_changes = list(range(-11, 10))
+            quench_changes = list(range(-6, 5))
+
+            grid = [
+                (rec_temp + tc, rec_quench + qc)
+                for tc in temp_changes
+                for qc in quench_changes
+            ]
+            candidate_temps, candidate_quenches = zip(*grid)
+            n_candidates = len(grid)
+
+            candidate_df = pd.DataFrame({
+                "Consumed": [rec_consumed] * n_candidates,
+                "Temp": candidate_temps,
+                "Quench": candidate_quenches,
+                "Month": [str(rec_month)] * n_candidates,
+                "Blend": [rec_blend] * n_candidates
+            })
+
+            candidate_predictions = agtron_model.predict(candidate_df)
+            candidate_errors = [abs(target_agtron - pred) for pred in candidate_predictions]
+
+            recommendation_df = pd.DataFrame({
+                "Temp": candidate_temps,
+                "Quench": candidate_quenches,
+                "Expected Agtron": [round(float(p), 1) for p in candidate_predictions],
+                "Error": [round(float(e), 1) for e in candidate_errors]
+            })
+
+            recommendation_df = recommendation_df.sort_values("Error").reset_index(drop=True)
+            best_row = recommendation_df.iloc[0]
+
+            best_temp = best_row["Temp"]
+            best_quench = best_row["Quench"]
+            best_prediction = best_row["Expected Agtron"]
+            best_error = best_row["Error"]
+            top_df = recommendation_df.head(5)
 
         st.subheader("Current Roast")
 
         st.write(
             f"Current Predicted Agtron: {current_prediction:.1f}"
         )
-        difference = target_agtron - current_prediction
         st.write(
             f"Gap to Target: {difference:.1f}"
         )
-
-        # Vectorized candidate evaluation (keeping existing search ranges)
-        temp_changes = list(range(-11, 10))
-        quench_changes = list(range(-6, 5))
-
-        grid = [
-            (rec_temp + tc, rec_quench + qc)
-            for tc in temp_changes
-            for qc in quench_changes
-        ]
-        candidate_temps, candidate_quenches = zip(*grid)
-        n_candidates = len(grid)
-
-        candidate_df = pd.DataFrame({
-            "Consumed": [rec_consumed] * n_candidates,
-            "Temp": candidate_temps,
-            "Quench": candidate_quenches,
-            "Month": [str(rec_month)] * n_candidates,
-            "Blend": [rec_blend] * n_candidates
-        })
-
-        candidate_predictions = agtron_model.predict(candidate_df)
-        candidate_errors = [abs(target_agtron - pred) for pred in candidate_predictions]
-
-        recommendation_df = pd.DataFrame({
-            "Temp": candidate_temps,
-            "Quench": candidate_quenches,
-            "Expected Agtron": [round(float(p), 1) for p in candidate_predictions],
-            "Error": [round(float(e), 1) for e in candidate_errors]
-        })
-
-        recommendation_df = recommendation_df.sort_values("Error").reset_index(drop=True)
-        best_row = recommendation_df.iloc[0]
-
-        best_temp = best_row["Temp"]
-        best_quench = best_row["Quench"]
-        best_prediction = best_row["Expected Agtron"]
-        best_error = best_row["Error"]
 
         st.subheader("Optimized Recommendation")
 
@@ -313,6 +374,6 @@ with tab2:
         st.subheader("Top 5 Recommendations")
 
         st.dataframe(
-            recommendation_df.head(5),
+            top_df,
             use_container_width=True
         )

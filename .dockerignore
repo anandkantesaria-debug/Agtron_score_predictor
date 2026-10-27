@@ -1,0 +1,43 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Virtual environments & Python caches
+.venv
+venv
+env
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Raw datasets
+*.csv
+*.tsv
+*.parquet
+Data_time_moisture.csv
+Data_sample.csv
+
+# Local MLflow state & CatBoost training outputs
+mlruns/
+mlartifacts/
+mlflow.db
+mlflow.db.wal
+catboost_info/
+
+# Local logs & temporary files
+logs/
+*.jsonl
+*.tmp
+
+# IDE & OS files
+.vscode/
+.idea/
+.devcontainer/
+Thumbs.db
+Desktop.ini
+
