@@ -1,33 +1,129 @@
-name: Agtron Pipeline
+name: Agtron CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
-
-  test:
-
+  # ==========================================
+  # Stage 1: Lint & Typecheck
+  # ==========================================
+  lint:
+    name: Lint & Typecheck
     runs-on: ubuntu-latest
-
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - uses: actions/checkout@v4
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
 
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      - name: Install linting & typing dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff mypy pydantic fastapi pandas
 
-    - name: Install Dependencies
-      run: |
-        pip install -r requirements.txt
+      - name: Run Ruff linter
+        run: ruff check api tests
 
-    - name: Verify CatBoost Model
-      run: |
-        python verify_model.py
+      - name: Run Ruff format check
+        run: ruff format --check api tests
 
-    - name: Run Tests
-      run: |
-        pytest
+      - name: Run Mypy type-checker
+        run: mypy api --ignore-missing-imports
+
+  # ==========================================
+  # Stage 2: Unit & API Tests
+  # ==========================================
+  test:
+    name: Unit & API Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify CatBoost model artifact
+        run: python verify_model.py
+
+      - name: Run Pytest suite (unit + FastAPI TestClient)
+        run: pytest -v
+
+  # ==========================================
+  # Stage 3: Build & Smoke-Test Docker Image
+  # ==========================================
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: agtron-predictor:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test container /health endpoint
+        run: |
+          docker run -d --name agtron-smoke -p 8000:8000 agtron-predictor:ci
+          for i in {1..15}; do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              echo "Container is healthy!"
+              docker rm -f agtron-smoke
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs agtron-smoke
+          docker rm -f agtron-smoke
+          exit 1
+
+  # ==========================================
+  # Stage 4: Deploy to Render (main branch only)
+  # ==========================================
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - name: Trigger Render Deploy Hook
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "::notice::RENDER_DEPLOY_HOOK_URL secret is not set yet. Add it in GitHub Settings -> Secrets and variables -> Actions to enable automatic Render deploys."
+            exit 0
+          fi
+          curl -fsSL -X POST "$RENDER_DEPLOY_HOOK_URL"
+          echo "Render deployment triggered successfully."

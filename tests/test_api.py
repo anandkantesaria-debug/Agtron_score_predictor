@@ -1,12 +1,12 @@
 """API integration tests for the FastAPI serving endpoints."""
 
 import json
-from pathlib import Path
 import sys
-from typing import Iterator
+from collections.abc import Iterator
+from pathlib import Path
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -55,15 +55,29 @@ def test_predict_happy_path(client: TestClient) -> None:
     assert len(data["model_version"]) > 0
 
 
-def test_predict_normalizes_blend_and_accepts_lowercase_fields(client: TestClient) -> None:
+def test_predict_normalizes_blend_and_accepts_lowercase_fields(
+    client: TestClient,
+) -> None:
     """POST /predict should normalize float-like blend strings and accept lowercase keys."""
     canonical = client.post(
         "/predict",
-        json={"Consumed": 500.0, "Temp": 440.0, "Quench": 73.0, "Month": "1", "Blend": "284"},
+        json={
+            "Consumed": 500.0,
+            "Temp": 440.0,
+            "Quench": 73.0,
+            "Month": "1",
+            "Blend": "284",
+        },
     ).json()
     normalized = client.post(
         "/predict",
-        json={"consumed": 500.0, "temp": 440.0, "quench": 73.0, "month": 1, "blend": " 284.0 "},
+        json={
+            "consumed": 500.0,
+            "temp": 440.0,
+            "quench": 73.0,
+            "month": 1,
+            "blend": " 284.0 ",
+        },
     ).json()
 
     assert normalized["predicted_agtron"] == canonical["predicted_agtron"]
@@ -104,37 +118,79 @@ def test_recommend_happy_path(client: TestClient) -> None:
         # Out-of-range temperature (too low)
         (
             "/predict",
-            {"Consumed": 500.0, "Temp": 150.0, "Quench": 73.0, "Month": "1", "Blend": "284"},
+            {
+                "Consumed": 500.0,
+                "Temp": 150.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "284",
+            },
         ),
         # Out-of-range temperature (too high)
         (
             "/predict",
-            {"Consumed": 500.0, "Temp": 750.0, "Quench": 73.0, "Month": "1", "Blend": "284"},
+            {
+                "Consumed": 500.0,
+                "Temp": 750.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "284",
+            },
         ),
         # Negative quench
         (
             "/predict",
-            {"Consumed": 500.0, "Temp": 440.0, "Quench": -5.0, "Month": "1", "Blend": "284"},
+            {
+                "Consumed": 500.0,
+                "Temp": 440.0,
+                "Quench": -5.0,
+                "Month": "1",
+                "Blend": "284",
+            },
         ),
         # Zero or negative consumed weight
         (
             "/predict",
-            {"Consumed": 0.0, "Temp": 440.0, "Quench": 73.0, "Month": "1", "Blend": "284"},
+            {
+                "Consumed": 0.0,
+                "Temp": 440.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "284",
+            },
         ),
         # Unknown blend not in training data
         (
             "/predict",
-            {"Consumed": 500.0, "Temp": 440.0, "Quench": 73.0, "Month": "1", "Blend": "99999"},
+            {
+                "Consumed": 500.0,
+                "Temp": 440.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "99999",
+            },
         ),
         # Non-numeric blend string
         (
             "/predict",
-            {"Consumed": 500.0, "Temp": 440.0, "Quench": 73.0, "Month": "1", "Blend": "invalid"},
+            {
+                "Consumed": 500.0,
+                "Temp": 440.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "invalid",
+            },
         ),
         # Invalid month (> 12)
         (
             "/predict",
-            {"Consumed": 500.0, "Temp": 440.0, "Quench": 73.0, "Month": "13", "Blend": "284"},
+            {
+                "Consumed": 500.0,
+                "Temp": 440.0,
+                "Quench": 73.0,
+                "Month": "13",
+                "Blend": "284",
+            },
         ),
         # Out-of-range target_agtron on /recommend
         (
@@ -192,5 +248,3 @@ def test_predict_logs_structured_jsonl_record(
     assert "timestamp" in record
     assert isinstance(record["latency_ms"], float)
     assert record["latency_ms"] >= 0.0
-
-

@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import time
-from typing import Any, AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
+import pandas as pd
 from catboost import CatBoostRegressor
 from fastapi import FastAPI, HTTPException, Request, Response
-import pandas as pd
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 DEFAULT_MODEL_PATH = Path(os.getenv("MODEL_PATH", "models/agtron_model.cbm"))
-DEFAULT_PREDICTION_LOG_PATH = Path(os.getenv("PREDICTION_LOG_PATH", "logs/predictions.jsonl"))
+DEFAULT_PREDICTION_LOG_PATH = Path(
+    os.getenv("PREDICTION_LOG_PATH", "logs/predictions.jsonl")
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -26,7 +29,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -54,33 +57,259 @@ def configure_logger() -> logging.Logger:
 logger = configure_logger()
 
 # All 249 blend codes observed in training data
-KNOWN_BLENDS: frozenset[str] = frozenset({
-    "1", "102", "103", "105", "106", "107", "108", "112", "113", "115",
-    "125", "127", "132", "133", "137", "142", "144", "148", "152", "156",
-    "159", "160", "190", "200", "201", "202", "205", "207", "208", "210",
-    "212", "214", "215", "216", "217", "218", "219", "220", "222", "223",
-    "224", "225", "226", "227", "228", "229", "230", "231", "232", "234",
-    "235", "236", "240", "241", "242", "245", "247", "249", "250", "251",
-    "252", "253", "254", "256", "257", "258", "261", "267", "268", "270",
-    "271", "272", "273", "274", "280", "281", "282", "284", "286", "287",
-    "288", "289", "291", "292", "293", "294", "295", "299", "302", "304",
-    "305", "306", "309", "311", "312", "313", "314", "318", "319", "320",
-    "331", "335", "340", "341", "342", "350", "379", "380", "383", "396",
-    "397", "398", "399", "400", "405", "407", "410", "414", "434", "435",
-    "442", "444", "450", "452", "454", "456", "458", "484", "490", "492",
-    "494", "498", "504", "507", "509", "514", "516", "517", "518", "521",
-    "531", "533", "534", "536", "560", "581", "583", "584", "600", "601",
-    "602", "603", "604", "605", "607", "615", "617", "620", "624", "625",
-    "626", "628", "630", "632", "634", "636", "650", "675", "676", "680",
-    "685", "690", "693", "695", "696", "697", "698", "700", "702", "704",
-    "710", "712", "715", "716", "717", "718", "720", "722", "723", "724",
-    "725", "727", "729", "731", "732", "733", "734", "737", "739", "741",
-    "743", "756", "763", "795", "805", "815", "822", "825", "826", "827",
-    "830", "831", "832", "833", "834", "835", "836", "837", "838", "839",
-    "841", "842", "850", "851", "852", "861", "862", "865", "868", "870",
-    "880", "882", "884", "902", "904", "910", "911", "912", "925", "927",
-    "956", "960", "962", "964", "966", "968", "970", "974", "9010",
-})
+KNOWN_BLENDS: frozenset[str] = frozenset(
+    {
+        "1",
+        "102",
+        "103",
+        "105",
+        "106",
+        "107",
+        "108",
+        "112",
+        "113",
+        "115",
+        "125",
+        "127",
+        "132",
+        "133",
+        "137",
+        "142",
+        "144",
+        "148",
+        "152",
+        "156",
+        "159",
+        "160",
+        "190",
+        "200",
+        "201",
+        "202",
+        "205",
+        "207",
+        "208",
+        "210",
+        "212",
+        "214",
+        "215",
+        "216",
+        "217",
+        "218",
+        "219",
+        "220",
+        "222",
+        "223",
+        "224",
+        "225",
+        "226",
+        "227",
+        "228",
+        "229",
+        "230",
+        "231",
+        "232",
+        "234",
+        "235",
+        "236",
+        "240",
+        "241",
+        "242",
+        "245",
+        "247",
+        "249",
+        "250",
+        "251",
+        "252",
+        "253",
+        "254",
+        "256",
+        "257",
+        "258",
+        "261",
+        "267",
+        "268",
+        "270",
+        "271",
+        "272",
+        "273",
+        "274",
+        "280",
+        "281",
+        "282",
+        "284",
+        "286",
+        "287",
+        "288",
+        "289",
+        "291",
+        "292",
+        "293",
+        "294",
+        "295",
+        "299",
+        "302",
+        "304",
+        "305",
+        "306",
+        "309",
+        "311",
+        "312",
+        "313",
+        "314",
+        "318",
+        "319",
+        "320",
+        "331",
+        "335",
+        "340",
+        "341",
+        "342",
+        "350",
+        "379",
+        "380",
+        "383",
+        "396",
+        "397",
+        "398",
+        "399",
+        "400",
+        "405",
+        "407",
+        "410",
+        "414",
+        "434",
+        "435",
+        "442",
+        "444",
+        "450",
+        "452",
+        "454",
+        "456",
+        "458",
+        "484",
+        "490",
+        "492",
+        "494",
+        "498",
+        "504",
+        "507",
+        "509",
+        "514",
+        "516",
+        "517",
+        "518",
+        "521",
+        "531",
+        "533",
+        "534",
+        "536",
+        "560",
+        "581",
+        "583",
+        "584",
+        "600",
+        "601",
+        "602",
+        "603",
+        "604",
+        "605",
+        "607",
+        "615",
+        "617",
+        "620",
+        "624",
+        "625",
+        "626",
+        "628",
+        "630",
+        "632",
+        "634",
+        "636",
+        "650",
+        "675",
+        "676",
+        "680",
+        "685",
+        "690",
+        "693",
+        "695",
+        "696",
+        "697",
+        "698",
+        "700",
+        "702",
+        "704",
+        "710",
+        "712",
+        "715",
+        "716",
+        "717",
+        "718",
+        "720",
+        "722",
+        "723",
+        "724",
+        "725",
+        "727",
+        "729",
+        "731",
+        "732",
+        "733",
+        "734",
+        "737",
+        "739",
+        "741",
+        "743",
+        "756",
+        "763",
+        "795",
+        "805",
+        "815",
+        "822",
+        "825",
+        "826",
+        "827",
+        "830",
+        "831",
+        "832",
+        "833",
+        "834",
+        "835",
+        "836",
+        "837",
+        "838",
+        "839",
+        "841",
+        "842",
+        "850",
+        "851",
+        "852",
+        "861",
+        "862",
+        "865",
+        "868",
+        "870",
+        "880",
+        "882",
+        "884",
+        "902",
+        "904",
+        "910",
+        "911",
+        "912",
+        "925",
+        "927",
+        "956",
+        "960",
+        "962",
+        "964",
+        "966",
+        "968",
+        "970",
+        "974",
+        "9010",
+    }
+)
 
 VALID_MONTHS: frozenset[str] = frozenset(str(m) for m in range(1, 13))
 
@@ -99,7 +328,9 @@ def clean_blend_input(blend_val: Any) -> str:
         raise ValueError(f"Invalid blend format: '{blend_val}'.") from exc
 
     if normalized not in KNOWN_BLENDS:
-        raise ValueError(f"Unknown blend '{normalized}'. Must be a known training blend.")
+        raise ValueError(
+            f"Unknown blend '{normalized}'. Must be a known training blend."
+        )
     return normalized
 
 
@@ -112,9 +343,15 @@ def compute_file_sha256(path: Path) -> str:
     return hasher.hexdigest()[:12]
 
 
-def load_catboost_model(model_path: Path | None = None) -> tuple[CatBoostRegressor, str]:
+def load_catboost_model(
+    model_path: Path | None = None,
+) -> tuple[CatBoostRegressor, str]:
     """Load CatBoostRegressor from disk and return (model, version_hash)."""
-    resolved_path = Path(model_path or os.getenv("MODEL_PATH", str(DEFAULT_MODEL_PATH)))
+    resolved_path = (
+        model_path
+        if model_path is not None
+        else Path(os.getenv("MODEL_PATH", str(DEFAULT_MODEL_PATH)))
+    )
     if not resolved_path.exists():
         raise FileNotFoundError(f"Model file not found at {resolved_path}")
     model = CatBoostRegressor()
@@ -131,7 +368,7 @@ def get_prediction_log_path() -> Path:
 def log_prediction_record(
     *,
     endpoint: str,
-    payload: "RoastInput",
+    payload: RoastInput,
     predicted_agtron: float,
     model_version: str,
     latency_ms: float,
@@ -139,7 +376,7 @@ def log_prediction_record(
 ) -> dict[str, Any]:
     """Write a structured JSON prediction record to logs/predictions.jsonl and the service logger."""
     record: dict[str, Any] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "event": "prediction",
         "endpoint": endpoint,
         "Consumed": float(payload.Consumed),
@@ -175,9 +412,14 @@ def _ensure_model_loaded(app_instance: FastAPI) -> None:
         app_instance.state.model_loaded = True
         logger.info(
             "Model loaded successfully",
-            extra={"structured_data": {"event": "model_loaded", "model_version": model_hash}},
+            extra={
+                "structured_data": {
+                    "event": "model_loaded",
+                    "model_version": model_hash,
+                }
+            },
         )
-    except Exception as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         app_instance.state.model = None
         app_instance.state.model_version = "unavailable"
         app_instance.state.model_loaded = False
@@ -262,7 +504,9 @@ class RoastInput(BaseModel):
         try:
             cleaned = str(int(float(str(value).strip())))
         except (ValueError, TypeError) as exc:
-            raise ValueError(f"Invalid month: '{value}'. Must be an integer from 1 to 12.") from exc
+            raise ValueError(
+                f"Invalid month: '{value}'. Must be an integer from 1 to 12."
+            ) from exc
         if cleaned not in VALID_MONTHS:
             raise ValueError(f"Month must be between 1 and 12, got '{value}'.")
         return cleaned
@@ -289,16 +533,24 @@ class HealthResponse(BaseModel):
     """Response schema for GET /health."""
 
     status: str = Field(..., description="Service health status ('ok' or 'degraded').")
-    model_loaded: bool = Field(..., description="Whether the CatBoost model is loaded in memory.")
-    model_version: str = Field(..., description="Short SHA-256 hash of the loaded model artifact.")
-    model_hash: str = Field(..., description="Short SHA-256 hash of the loaded model artifact.")
+    model_loaded: bool = Field(
+        ..., description="Whether the CatBoost model is loaded in memory."
+    )
+    model_version: str = Field(
+        ..., description="Short SHA-256 hash of the loaded model artifact."
+    )
+    model_hash: str = Field(
+        ..., description="Short SHA-256 hash of the loaded model artifact."
+    )
 
 
 class PredictionResponse(BaseModel):
     """Response schema for POST /predict."""
 
     predicted_agtron: float = Field(..., description="Predicted Agtron color score.")
-    model_version: str = Field(..., description="Model version/hash used for inference.")
+    model_version: str = Field(
+        ..., description="Model version/hash used for inference."
+    )
 
 
 class RecommendationCandidate(BaseModel):
@@ -306,24 +558,37 @@ class RecommendationCandidate(BaseModel):
 
     temp: float = Field(..., description="Candidate roast temperature (°F).")
     quench: float = Field(..., description="Candidate quench weight (lb).")
-    expected_agtron: float = Field(..., description="Predicted Agtron score at candidate settings.")
+    expected_agtron: float = Field(
+        ..., description="Predicted Agtron score at candidate settings."
+    )
     error: float = Field(..., description="Absolute distance from target Agtron.")
 
 
 class RecommendationResponse(BaseModel):
     """Response schema for POST /recommend."""
 
-    current_predicted_agtron: float = Field(..., description="Predicted Agtron for current input settings.")
+    current_predicted_agtron: float = Field(
+        ..., description="Predicted Agtron for current input settings."
+    )
     target_agtron: float = Field(..., description="Requested target Agtron score.")
-    gap_to_target: float = Field(..., description="Difference (target_agtron - current_predicted_agtron).")
+    gap_to_target: float = Field(
+        ..., description="Difference (target_agtron - current_predicted_agtron)."
+    )
     recommended_temp: float = Field(..., description="Optimal roast temperature (°F).")
     recommended_quench: float = Field(..., description="Optimal quench weight (lb).")
-    expected_agtron: float = Field(..., description="Expected Agtron score at recommended settings.")
-    distance_from_target: float = Field(..., description="Absolute error between expected and target Agtron.")
-    top_recommendations: list[RecommendationCandidate] = Field(
-        ..., description="Top 5 candidate settings ranked by smallest distance from target."
+    expected_agtron: float = Field(
+        ..., description="Expected Agtron score at recommended settings."
     )
-    model_version: str = Field(..., description="Model version/hash used for inference.")
+    distance_from_target: float = Field(
+        ..., description="Absolute error between expected and target Agtron."
+    )
+    top_recommendations: list[RecommendationCandidate] = Field(
+        ...,
+        description="Top 5 candidate settings ranked by smallest distance from target.",
+    )
+    model_version: str = Field(
+        ..., description="Model version/hash used for inference."
+    )
 
 
 app = FastAPI(
@@ -335,7 +600,9 @@ app = FastAPI(
 
 
 @app.middleware("http")
-async def log_http_requests(request: Request, call_next: Callable[[Request], Any]) -> Response:
+async def log_http_requests(
+    request: Request, call_next: Callable[[Request], Any]
+) -> Response:
     """Middleware that logs structured JSON metadata and latency for every HTTP request."""
     start_time = time.perf_counter()
     response: Response = await call_next(request)
@@ -437,14 +704,18 @@ def recommend_settings(payload: RoastInput, request: Request) -> RecommendationR
     candidate_predictions = model.predict(candidate_df)
     candidate_errors = [abs(target - float(pred)) for pred in candidate_predictions]
 
-    recommendation_df = pd.DataFrame(
-        {
-            "Temp": candidate_temps,
-            "Quench": candidate_quenches,
-            "Expected Agtron": [round(float(p), 2) for p in candidate_predictions],
-            "Error": [round(float(e), 2) for e in candidate_errors],
-        }
-    ).sort_values("Error").reset_index(drop=True)
+    recommendation_df = (
+        pd.DataFrame(
+            {
+                "Temp": candidate_temps,
+                "Quench": candidate_quenches,
+                "Expected Agtron": [round(float(p), 2) for p in candidate_predictions],
+                "Error": [round(float(e), 2) for e in candidate_errors],
+            }
+        )
+        .sort_values("Error")
+        .reset_index(drop=True)
+    )
 
     best_row = recommendation_df.iloc[0]
     top_candidates = [
