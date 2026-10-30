@@ -16,7 +16,10 @@ from typing import Any
 import pandas as pd
 from catboost import CatBoostRegressor
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+
+from api.ui import render_mobile_ui
 
 DEFAULT_MODEL_PATH = Path(os.getenv("MODEL_PATH", "models/agtron_model.cbm"))
 DEFAULT_PREDICTION_LOG_PATH = Path(
@@ -629,6 +632,15 @@ def _get_loaded_model(request: Request) -> tuple[CatBoostRegressor, str]:
     if model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
     return model, model_version
+
+
+SORTED_KNOWN_BLENDS: list[str] = sorted(KNOWN_BLENDS, key=int)
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def root() -> HTMLResponse:
+    """Serve the mobile-responsive web UI at the root URL."""
+    return HTMLResponse(content=render_mobile_ui(SORTED_KNOWN_BLENDS))
 
 
 @app.get("/health", response_model=HealthResponse, tags=["System"])

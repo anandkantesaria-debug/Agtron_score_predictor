@@ -22,6 +22,14 @@ def client() -> Iterator[TestClient]:
         yield test_client
 
 
+def test_root_serves_mobile_ui(client: TestClient) -> None:
+    """GET / should return the mobile-friendly HTML UI."""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Coffee Color Predictor" in response.text
+
+
 def test_health_endpoint(client: TestClient) -> None:
     """GET /health should return 200 OK with model loaded and version hash."""
     response = client.get("/health")
