@@ -474,6 +474,4 @@ def render_mobile_ui(blends: list[str]) -> str:
     }}
   </script>
 </body>
-</html>
-"""
-
+</html>"""
