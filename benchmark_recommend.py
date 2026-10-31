@@ -56,7 +56,9 @@ def summarize(values: list[float]) -> dict[str, float]:
     }
 
 
-def run_benchmark(url: str | None, warmup: int, num_requests: int) -> None:
+def run_benchmark(
+    url: str | None, warmup: int, num_requests: int, interval: float = 0.0
+) -> None:
     """Run warmup and measured requests against /recommend and print summary metrics."""
     inference_times: list[float] = []
     compute_times: list[float] = []
@@ -72,6 +74,8 @@ def run_benchmark(url: str | None, warmup: int, num_requests: int) -> None:
             for _ in range(warmup):
                 resp = http_client.post("/recommend", json=SAMPLE_PAYLOAD)
                 resp.raise_for_status()
+                if interval > 0:
+                    time.sleep(interval)
 
             for _ in range(num_requests):
                 t0 = time.perf_counter()
@@ -85,6 +89,8 @@ def run_benchmark(url: str | None, warmup: int, num_requests: int) -> None:
                 client_rtt_times.append(rtt_ms)
                 candidates_evaluated = int(body["candidates_evaluated"])
                 last_server_timing = resp.headers.get("server-timing", "")
+                if interval > 0:
+                    time.sleep(interval)
     else:
         target_label = "In-Process FastAPI TestClient (/recommend)"
         with TestClient(app) as test_client:
@@ -152,8 +158,19 @@ def main() -> None:
         default=100,
         help="Number of warm requests to measure (default: 100).",
     )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.0,
+        help="Seconds to sleep between requests to avoid 0.1 vCPU CFS burst throttling (default: 0.0).",
+    )
     args = parser.parse_args()
-    run_benchmark(url=args.url, warmup=args.warmup, num_requests=args.requests)
+    run_benchmark(
+        url=args.url,
+        warmup=args.warmup,
+        num_requests=args.requests,
+        interval=args.interval,
+    )
 
 
 if __name__ == "__main__":

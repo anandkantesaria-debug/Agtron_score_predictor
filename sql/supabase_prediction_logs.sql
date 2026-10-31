@@ -51,7 +51,8 @@ create policy "Allow insert for API telemetry"
     with check (true);
 
 -- Daily drift & latency monitoring view (visible in Supabase Table Editor -> Views)
-create or replace view public.daily_ood_drift_summary as
+create or replace view public.daily_ood_drift_summary
+with (security_invoker = on) as
 select
     date_trunc('day', timestamp) as day,
     endpoint,
