@@ -15,6 +15,7 @@ mlflow.set_tracking_uri(mlflow_uri)
 SERVING_MODEL_PATH = "models/agtron_model.cbm"
 
 from mlflow import MlflowClient
+from export_feature_bounds import export_feature_bounds
 
 client = MlflowClient(tracking_uri=mlflow_uri)
 
@@ -227,7 +228,11 @@ with mlflow.start_run(run_name="Agtron_CatBoost_2026_10_13"):
         os.replace(tmp_model_path, SERVING_MODEL_PATH)
         print(
             f"Champion model saved to {SERVING_MODEL_PATH}"
-        )   
+        )
+        bounds_path = export_feature_bounds(X_train, y_train_agtron)
+        print(
+            f"Champion feature bounds exported to {bounds_path}"
+        )
     else:
         mlflow.set_tag("Status", "Challenger")
         print(

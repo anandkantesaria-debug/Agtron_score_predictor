@@ -3,6 +3,7 @@ import httpx
 import streamlit as st
 import pandas as pd
 from catboost import CatBoostRegressor
+from api.main import RoastInput, evaluate_ood, load_feature_bounds
 
 API_URL = os.getenv("API_URL", "").rstrip("/")
 
@@ -17,6 +18,11 @@ st.set_page_config(
 def load_model():
     model = CatBoostRegressor()
     return model.load_model("models/agtron_model.cbm")
+
+
+@st.cache_resource
+def get_feature_bounds():
+    return load_feature_bounds()
 
 
 def clean_blend_input(blend_val):
@@ -146,6 +152,8 @@ with tab1:
             st.stop()
         blend = cleaned_blend
 
+        is_ood = False
+        ood_warnings = []
         if API_URL:
             try:
                 resp = httpx.post(
@@ -162,11 +170,29 @@ with tab1:
                 if resp.status_code != 200:
                     st.error(f"API error ({resp.status_code}): {resp.text}")
                     st.stop()
-                agtron_prediction = float(resp.json()["predicted_agtron"])
+                pred_data = resp.json()
+                agtron_prediction = float(pred_data["predicted_agtron"])
+                is_ood = bool(pred_data.get("is_ood", False))
+                ood_warnings = list(pred_data.get("ood_warnings", []))
             except Exception as e:
                 st.error(f"Failed to reach prediction API at {API_URL}: {e}")
                 st.stop()
         else:
+            try:
+                validated_input = RoastInput(
+                    Consumed=consumed,
+                    Temp=temp,
+                    Quench=quench,
+                    Month=str(month),
+                    Blend=blend,
+                )
+                is_ood, _, ood_warnings = evaluate_ood(
+                    validated_input, get_feature_bounds()
+                )
+            except ValueError as e:
+                st.error(f"Validation error: {e}")
+                st.stop()
+
             input_data = pd.DataFrame({
                 "Consumed": [consumed],
                 "Temp": [temp],
@@ -182,6 +208,12 @@ with tab1:
                 st.stop()
 
         st.divider()
+
+        if is_ood:
+            warning_bullets = "\n".join(f"- {w}" for w in ood_warnings)
+            st.warning(
+                f"⚠️ **Low-Confidence Prediction (Out-of-Distribution Input)**\n{warning_bullets}"
+            )
 
         st.metric(
             "Predicted Agtron",
@@ -265,6 +297,8 @@ with tab2:
             st.stop()
         rec_blend = cleaned_blend
 
+        rec_is_ood = False
+        rec_ood_warnings = []
         if API_URL:
             try:
                 resp = httpx.post(
@@ -289,6 +323,8 @@ with tab2:
                 best_quench = float(rec_data["recommended_quench"])
                 best_prediction = float(rec_data["expected_agtron"])
                 best_error = float(rec_data["distance_from_target"])
+                rec_is_ood = bool(rec_data.get("is_ood", False))
+                rec_ood_warnings = list(rec_data.get("ood_warnings", []))
                 top_df = pd.DataFrame([
                     {
                         "Temp": item["temp"],
@@ -302,6 +338,19 @@ with tab2:
                 st.error(f"Failed to reach recommendation API at {API_URL}: {e}")
                 st.stop()
         else:
+            try:
+                validated_rec_input = RoastInput(
+                    Consumed=rec_consumed,
+                    Temp=rec_temp,
+                    Quench=rec_quench,
+                    Month=str(rec_month),
+                    Blend=rec_blend,
+                    target_agtron=target_agtron,
+                )
+            except ValueError as e:
+                st.error(f"Validation error: {e}")
+                st.stop()
+
             input_data = pd.DataFrame({
                 "Consumed": [rec_consumed],
                 "Temp": [rec_temp],
@@ -346,11 +395,25 @@ with tab2:
             recommendation_df = recommendation_df.sort_values("Error").reset_index(drop=True)
             best_row = recommendation_df.iloc[0]
 
-            best_temp = best_row["Temp"]
-            best_quench = best_row["Quench"]
+            best_temp = float(best_row["Temp"])
+            best_quench = float(best_row["Quench"])
             best_prediction = best_row["Expected Agtron"]
             best_error = best_row["Error"]
             top_df = recommendation_df.head(5)
+
+            rec_is_ood, _, rec_ood_warnings = evaluate_ood(
+                validated_rec_input,
+                get_feature_bounds(),
+                check_target=True,
+                recommended_temp=best_temp,
+                recommended_quench=best_quench,
+            )
+
+        if rec_is_ood:
+            rec_warning_bullets = "\n".join(f"- {w}" for w in rec_ood_warnings)
+            st.warning(
+                f"⚠️ **Low-Confidence Recommendation (Out-of-Distribution Input)**\n{rec_warning_bullets}"
+            )
 
         st.subheader("Current Roast")
 

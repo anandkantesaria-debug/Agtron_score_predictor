@@ -9,6 +9,12 @@ services:
     envVars:
       - key: MODEL_PATH
         value: models/agtron_model.cbm
+      - key: FEATURE_BOUNDS_PATH
+        value: models/feature_bounds.json
       - key: PREDICTION_LOG_PATH
         value: logs/predictions.jsonl
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
 

@@ -13,15 +13,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pandas as pd
 from catboost import CatBoostRegressor
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from api.ui import render_mobile_ui
 
 DEFAULT_MODEL_PATH = Path(os.getenv("MODEL_PATH", "models/agtron_model.cbm"))
+DEFAULT_BOUNDS_PATH = Path(
+    os.getenv("FEATURE_BOUNDS_PATH", "models/feature_bounds.json")
+)
 DEFAULT_PREDICTION_LOG_PATH = Path(
     os.getenv("PREDICTION_LOG_PATH", "logs/predictions.jsonl")
 )
@@ -368,6 +372,177 @@ def get_prediction_log_path() -> Path:
     return Path(os.getenv("PREDICTION_LOG_PATH", str(DEFAULT_PREDICTION_LOG_PATH)))
 
 
+def load_feature_bounds(bounds_path: Path | None = None) -> dict[str, Any]:
+    """Load exported training feature boundary statistics from JSON."""
+    resolved_path = (
+        bounds_path
+        if bounds_path is not None
+        else Path(os.getenv("FEATURE_BOUNDS_PATH", str(DEFAULT_BOUNDS_PATH)))
+    )
+    if not resolved_path.exists():
+        logger.warning(
+            "Feature bounds file not found; OOD checks will be skipped",
+            extra={"structured_data": {"path": str(resolved_path)}},
+        )
+        return {}
+    try:
+        with resolved_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Failed to load feature bounds JSON",
+            extra={"structured_data": {"path": str(resolved_path), "error": str(exc)}},
+        )
+        return {}
+
+
+def evaluate_ood(
+    payload: RoastInput,
+    bounds: dict[str, Any],
+    *,
+    check_target: bool = False,
+    recommended_temp: float | None = None,
+    recommended_quench: float | None = None,
+) -> tuple[bool, list[str], list[str]]:
+    """Check whether valid roast inputs fall outside 1st–99th training percentiles or minimum categorical support."""
+    ood_features: list[str] = []
+    ood_warnings: list[str] = []
+
+    numeric_bounds = bounds.get("numeric_bounds", {})
+    numeric_checks: list[tuple[str, float]] = [
+        ("Consumed", float(payload.Consumed)),
+        ("Temp", float(payload.Temp)),
+        ("Quench", float(payload.Quench)),
+    ]
+    if check_target:
+        numeric_checks.append(("target_agtron", float(payload.target_agtron)))
+
+    for feat_name, val in numeric_checks:
+        feat_spec = numeric_bounds.get(feat_name)
+        if not isinstance(feat_spec, dict):
+            continue
+        p01 = float(feat_spec["p01"])
+        p99 = float(feat_spec["p99"])
+        unit = str(feat_spec.get("unit", "")).strip()
+        unit_suffix = f" {unit}" if unit else ""
+        if val < p01 or val > p99:
+            ood_features.append(feat_name)
+            ood_warnings.append(
+                f"{feat_name} ({val:.1f}{unit_suffix}) is outside 1st–99th training percentiles [{p01:.1f}, {p99:.1f}]{unit_suffix}."
+            )
+
+    cat_support = bounds.get("categorical_support", {})
+    for cat_name, cat_val in [
+        ("Month", str(payload.Month)),
+        ("Blend", str(payload.Blend)),
+    ]:
+        cat_spec = cat_support.get(cat_name)
+        if not isinstance(cat_spec, dict):
+            continue
+        low_support_counts = cat_spec.get("low_support_counts", {})
+        min_support = int(cat_spec.get("min_support", 20))
+        if isinstance(low_support_counts, dict) and cat_val in low_support_counts:
+            sample_count = int(low_support_counts[cat_val])
+            ood_features.append(cat_name)
+            ood_warnings.append(
+                f"{cat_name} '{cat_val}' has low training support ({sample_count} training samples < {min_support} threshold)."
+            )
+
+    if recommended_temp is not None and isinstance(numeric_bounds.get("Temp"), dict):
+        temp_spec = numeric_bounds["Temp"]
+        t_p01, t_p99 = float(temp_spec["p01"]), float(temp_spec["p99"])
+        if recommended_temp < t_p01 or recommended_temp > t_p99:
+            ood_features.append("recommended_temp")
+            ood_warnings.append(
+                f"Recommended Temp ({recommended_temp:.1f} °F) is outside 1st–99th training percentiles [{t_p01:.1f}, {t_p99:.1f}] °F."
+            )
+
+    if recommended_quench is not None and isinstance(
+        numeric_bounds.get("Quench"), dict
+    ):
+        quench_spec = numeric_bounds["Quench"]
+        q_p01, q_p99 = float(quench_spec["p01"]), float(quench_spec["p99"])
+        if recommended_quench < q_p01 or recommended_quench > q_p99:
+            ood_features.append("recommended_quench")
+            ood_warnings.append(
+                f"Recommended Quench ({recommended_quench:.1f} lb) is outside 1st–99th training percentiles [{q_p01:.1f}, {q_p99:.1f}] lb."
+            )
+
+    return len(ood_features) > 0, ood_features, ood_warnings
+
+
+async def log_to_supabase(
+    record: dict[str, Any],
+    http_client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Asynchronously stream prediction and OOD telemetry to Supabase PostgREST API."""
+    supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.getenv(
+        "SUPABASE_KEY", os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    ).strip()
+    supabase_table = (
+        os.getenv("SUPABASE_TABLE", "prediction_logs").strip() or "prediction_logs"
+    )
+
+    if not supabase_url or not supabase_key:
+        return False
+
+    endpoint_url = f"{supabase_url}/rest/v1/{supabase_table}"
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+    row_payload: dict[str, Any] = {
+        "timestamp": record.get("timestamp"),
+        "endpoint": record.get("endpoint"),
+        "model_version": record.get("model_version"),
+        "consumed": record.get("Consumed"),
+        "temp": record.get("Temp"),
+        "quench": record.get("Quench"),
+        "month": record.get("Month"),
+        "blend": record.get("Blend"),
+        "target_agtron": record.get("target_agtron"),
+        "predicted_agtron": record.get("predicted_agtron"),
+        "recommended_temp": record.get("recommended_temp"),
+        "recommended_quench": record.get("recommended_quench"),
+        "expected_agtron": record.get("expected_agtron"),
+        "latency_ms": record.get("latency_ms"),
+        "inference_latency_ms": record.get("inference_latency_ms"),
+        "compute_latency_ms": record.get("compute_latency_ms"),
+        "is_ood": bool(record.get("is_ood", False)),
+        "ood_features": record.get("ood_features", []),
+        "ood_warnings": record.get("ood_warnings", []),
+    }
+
+    try:
+        if http_client is not None:
+            resp = await http_client.post(
+                endpoint_url, headers=headers, json=row_payload
+            )
+            resp.raise_for_status()
+        else:
+            async with httpx.AsyncClient(timeout=3.0) as temp_client:
+                resp = await temp_client.post(
+                    endpoint_url, headers=headers, json=row_payload
+                )
+                resp.raise_for_status()
+        return True
+    except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+        logger.warning(
+            "Supabase telemetry logging failed",
+            extra={
+                "structured_data": {
+                    "event": "supabase_log_error",
+                    "error": str(exc),
+                }
+            },
+        )
+        return False
+
+
 def log_prediction_record(
     *,
     endpoint: str,
@@ -375,6 +550,9 @@ def log_prediction_record(
     predicted_agtron: float,
     model_version: str,
     latency_ms: float,
+    is_ood: bool = False,
+    ood_features: list[str] | None = None,
+    ood_warnings: list[str] | None = None,
     extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a structured JSON prediction record to logs/predictions.jsonl and the service logger."""
@@ -391,6 +569,9 @@ def log_prediction_record(
         "Agtron": round(float(predicted_agtron), 2),
         "model_version": model_version,
         "latency_ms": round(float(latency_ms), 3),
+        "is_ood": bool(is_ood),
+        "ood_features": list(ood_features or []),
+        "ood_warnings": list(ood_warnings or []),
     }
     if extra_fields:
         record.update(extra_fields)
@@ -405,7 +586,9 @@ def log_prediction_record(
 
 
 def _ensure_model_loaded(app_instance: FastAPI) -> None:
-    """Ensure model is loaded on app.state (supports both lifespan and direct TestClient calls)."""
+    """Ensure model and feature bounds are loaded on app.state (supports both lifespan and direct TestClient calls)."""
+    if getattr(app_instance.state, "feature_bounds", None) is None:
+        app_instance.state.feature_bounds = load_feature_bounds()
     if getattr(app_instance.state, "model", None) is not None:
         return
     try:
@@ -437,6 +620,10 @@ async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     """Load the CatBoost model once at startup and clean up on shutdown."""
     _ensure_model_loaded(app_instance)
     yield
+    http_client = getattr(app_instance.state, "http_client", None)
+    if http_client is not None:
+        await http_client.aclose()
+        app_instance.state.http_client = None
     app_instance.state.model = None
     app_instance.state.model_loaded = False
 
@@ -554,6 +741,18 @@ class PredictionResponse(BaseModel):
     model_version: str = Field(
         ..., description="Model version/hash used for inference."
     )
+    is_ood: bool = Field(
+        default=False,
+        description="True if any input feature falls outside 1st–99th training percentiles or minimum support.",
+    )
+    ood_features: list[str] = Field(
+        default_factory=list,
+        description="Feature names flagged as out-of-distribution.",
+    )
+    ood_warnings: list[str] = Field(
+        default_factory=list,
+        description="Human-readable low-confidence warnings for out-of-distribution inputs.",
+    )
 
 
 class RecommendationCandidate(BaseModel):
@@ -607,6 +806,18 @@ class RecommendationResponse(BaseModel):
     )
     model_version: str = Field(
         ..., description="Model version/hash used for inference."
+    )
+    is_ood: bool = Field(
+        default=False,
+        description="True if any input or recommended setting falls outside 1st–99th training percentiles or minimum support.",
+    )
+    ood_features: list[str] = Field(
+        default_factory=list,
+        description="Feature names flagged as out-of-distribution.",
+    )
+    ood_warnings: list[str] = Field(
+        default_factory=list,
+        description="Human-readable low-confidence warnings for out-of-distribution inputs or recommendations.",
     )
 
 
@@ -674,35 +885,55 @@ def health_check(request: Request) -> HealthResponse:
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
-def predict_agtron(payload: RoastInput, request: Request) -> PredictionResponse:
+def predict_agtron(
+    payload: RoastInput,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> PredictionResponse:
     """Predict the Agtron color score for a given set of roast inputs."""
     start_time = time.perf_counter()
     model, model_version = _get_loaded_model(request)
+    bounds = getattr(request.app.state, "feature_bounds", None) or {}
+    is_ood, ood_features, ood_warnings = evaluate_ood(payload, bounds)
+
     input_df = payload.to_dataframe()
     prediction = round(float(model.predict(input_df)[0]), 2)
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-    log_prediction_record(
+    record = log_prediction_record(
         endpoint="/predict",
         payload=payload,
         predicted_agtron=prediction,
         model_version=model_version,
         latency_ms=latency_ms,
+        is_ood=is_ood,
+        ood_features=ood_features,
+        ood_warnings=ood_warnings,
+    )
+    background_tasks.add_task(
+        log_to_supabase, record, getattr(request.app.state, "http_client", None)
     )
 
     return PredictionResponse(
         predicted_agtron=prediction,
         model_version=model_version,
+        is_ood=is_ood,
+        ood_features=ood_features,
+        ood_warnings=ood_warnings,
     )
 
 
 @app.post("/recommend", response_model=RecommendationResponse, tags=["Inference"])
 def recommend_settings(
-    payload: RoastInput, request: Request, response: Response
+    payload: RoastInput,
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
 ) -> RecommendationResponse:
     """Recommend optimal temperature and quench adjustments to hit a target Agtron score."""
     start_time = time.perf_counter()
     model, model_version = _get_loaded_model(request)
+    bounds = getattr(request.app.state, "feature_bounds", None) or {}
 
     input_df = payload.to_dataframe()
     current_prediction = float(model.predict(input_df)[0])
@@ -753,6 +984,8 @@ def recommend_settings(
     )
 
     best_row = recommendation_df.iloc[0]
+    best_temp = float(best_row["Temp"])
+    best_quench = float(best_row["Quench"])
     top_candidates = [
         RecommendationCandidate(
             temp=float(row["Temp"]),
@@ -762,6 +995,14 @@ def recommend_settings(
         )
         for _, row in recommendation_df.head(5).iterrows()
     ]
+
+    is_ood, ood_features, ood_warnings = evaluate_ood(
+        payload,
+        bounds,
+        check_target=True,
+        recommended_temp=best_temp,
+        recommended_quench=best_quench,
+    )
 
     compute_end = time.perf_counter()
 
@@ -779,29 +1020,35 @@ def recommend_settings(
     response.headers["X-Inference-Time-Ms"] = str(inference_latency_ms)
     response.headers["X-Compute-Time-Ms"] = str(compute_latency_ms)
 
-    log_prediction_record(
+    record = log_prediction_record(
         endpoint="/recommend",
         payload=payload,
         predicted_agtron=current_prediction,
         model_version=model_version,
         latency_ms=total_latency_ms,
+        is_ood=is_ood,
+        ood_features=ood_features,
+        ood_warnings=ood_warnings,
         extra_fields={
             "target_agtron": round(target, 2),
-            "recommended_temp": float(best_row["Temp"]),
-            "recommended_quench": float(best_row["Quench"]),
+            "recommended_temp": best_temp,
+            "recommended_quench": best_quench,
             "expected_agtron": float(best_row["Expected Agtron"]),
             "candidates_evaluated": n_candidates,
             "inference_latency_ms": inference_latency_ms,
             "compute_latency_ms": compute_latency_ms,
         },
     )
+    background_tasks.add_task(
+        log_to_supabase, record, getattr(request.app.state, "http_client", None)
+    )
 
     return RecommendationResponse(
         current_predicted_agtron=round(current_prediction, 2),
         target_agtron=round(target, 2),
         gap_to_target=round(gap, 2),
-        recommended_temp=float(best_row["Temp"]),
-        recommended_quench=float(best_row["Quench"]),
+        recommended_temp=best_temp,
+        recommended_quench=best_quench,
         expected_agtron=float(best_row["Expected Agtron"]),
         distance_from_target=float(best_row["Error"]),
         top_recommendations=top_candidates,
@@ -810,4 +1057,7 @@ def recommend_settings(
         compute_latency_ms=compute_latency_ms,
         total_latency_ms=total_latency_ms,
         model_version=model_version,
+        is_ood=is_ood,
+        ood_features=ood_features,
+        ood_warnings=ood_warnings,
     )

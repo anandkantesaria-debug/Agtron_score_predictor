@@ -181,6 +181,25 @@ def render_mobile_ui(blends: list[str]) -> str:
       font-size: 0.9rem;
       display: none;
     }}
+    .warning-box {{
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 8px;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      color: #92400e;
+      font-size: 0.88rem;
+      text-align: left;
+      display: none;
+    }}
+    .warning-box strong {{
+      display: block;
+      margin-bottom: 4px;
+      font-size: 0.92rem;
+    }}
+    .warning-box ul {{
+      margin-left: 18px;
+    }}
     .rec-grid {{
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -290,6 +309,7 @@ def render_mobile_ui(blends: list[str]) -> str:
     </form>
 
     <div id="pred-error" class="error-box"></div>
+    <div id="pred-warning" class="warning-box"></div>
     <div id="pred-result" class="result-box">
       <div class="metric-label">Predicted Agtron</div>
       <div id="pred-value" class="metric-value">--</div>
@@ -342,6 +362,7 @@ def render_mobile_ui(blends: list[str]) -> str:
     </form>
 
     <div id="rec-error" class="error-box"></div>
+    <div id="rec-warning" class="warning-box"></div>
     <div id="rec-result" class="result-box">
       <div class="metric-label">Expected Agtron</div>
       <div id="rec-expected" class="metric-value">--</div>
@@ -382,12 +403,27 @@ def render_mobile_ui(blends: list[str]) -> str:
       return (data && data.detail) ? String(data.detail) : 'Request failed.';
     }}
 
+    function renderOodWarning(box, data) {{
+      if (data && data.is_ood) {{
+        const warnings = Array.isArray(data.ood_warnings) && data.ood_warnings.length
+          ? data.ood_warnings.map(w => `<li>${{w}}</li>`).join('')
+          : '<li>One or more inputs fall outside the 1st–99th training percentiles.</li>';
+        box.innerHTML = `<strong>⚠️ Low-Confidence Prediction (Out-of-Distribution Input)</strong><ul>${{warnings}}</ul>`;
+        box.style.display = 'block';
+      }} else {{
+        box.style.display = 'none';
+        box.innerHTML = '';
+      }}
+    }}
+
     async function submitPredict(e) {{
       e.preventDefault();
       const btn = document.getElementById('pred-submit');
       const errBox = document.getElementById('pred-error');
+      const warnBox = document.getElementById('pred-warning');
       const resBox = document.getElementById('pred-result');
       errBox.style.display = 'none';
+      warnBox.style.display = 'none';
       btn.disabled = true;
       btn.textContent = 'PREDICTING...';
       try {{
@@ -409,6 +445,7 @@ def render_mobile_ui(blends: list[str]) -> str:
           resBox.style.display = 'none';
         }} else {{
           document.getElementById('pred-value').textContent = data.predicted_agtron.toFixed(1);
+          renderOodWarning(warnBox, data);
           resBox.style.display = 'block';
         }}
       }} catch (err) {{
@@ -424,8 +461,10 @@ def render_mobile_ui(blends: list[str]) -> str:
       e.preventDefault();
       const btn = document.getElementById('rec-submit');
       const errBox = document.getElementById('rec-error');
+      const warnBox = document.getElementById('rec-warning');
       const resBox = document.getElementById('rec-result');
       errBox.style.display = 'none';
+      warnBox.style.display = 'none';
       btn.disabled = true;
       btn.textContent = 'CALCULATING...';
       try {{
@@ -462,6 +501,7 @@ def render_mobile_ui(blends: list[str]) -> str:
               <td>${{row.error.toFixed(2)}}</td>
             </tr>
           `).join('');
+          renderOodWarning(warnBox, data);
           resBox.style.display = 'block';
         }}
       }} catch (err) {{

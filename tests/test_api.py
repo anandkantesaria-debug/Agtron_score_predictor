@@ -61,6 +61,9 @@ def test_predict_happy_path(client: TestClient) -> None:
     assert 15.0 <= data["predicted_agtron"] <= 65.0
     assert isinstance(data["model_version"], str)
     assert len(data["model_version"]) > 0
+    assert data["is_ood"] is False
+    assert data["ood_features"] == []
+    assert data["ood_warnings"] == []
 
 
 def test_predict_normalizes_blend_and_accepts_lowercase_fields(
@@ -129,6 +132,9 @@ def test_recommend_happy_path(client: TestClient) -> None:
     assert "compute;dur=" in response.headers["server-timing"]
     assert "x-inference-time-ms" in response.headers
     assert "x-compute-time-ms" in response.headers
+    assert data["is_ood"] is False
+    assert data["ood_features"] == []
+    assert data["ood_warnings"] == []
 
 
 @pytest.mark.parametrize(
@@ -267,3 +273,128 @@ def test_predict_logs_structured_jsonl_record(
     assert "timestamp" in record
     assert isinstance(record["latency_ms"], float)
     assert record["latency_ms"] >= 0.0
+    assert record["is_ood"] is False
+    assert record["ood_features"] == []
+
+
+@pytest.mark.parametrize(
+    "endpoint,ood_payload,expected_ood_feature",
+    [
+        # Consumed outside [390.7, 509.0] lb but within Pydantic (0, 1000]
+        (
+            "/predict",
+            {
+                "Consumed": 250.0,
+                "Temp": 440.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "284",
+            },
+            "Consumed",
+        ),
+        # Temp outside [413.0, 474.0] °F but within Pydantic [300, 600]
+        (
+            "/predict",
+            {
+                "Consumed": 500.0,
+                "Temp": 350.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "284",
+            },
+            "Temp",
+        ),
+        # Quench outside [26.5, 80.0] lb but within Pydantic [0, 150]
+        (
+            "/predict",
+            {
+                "Consumed": 500.0,
+                "Temp": 440.0,
+                "Quench": 110.0,
+                "Month": "1",
+                "Blend": "284",
+            },
+            "Quench",
+        ),
+        # Rare blend (< 20 training samples)
+        (
+            "/predict",
+            {
+                "Consumed": 500.0,
+                "Temp": 440.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "202",
+            },
+            "Blend",
+        ),
+        # Target Agtron outside [24.7, 54.2] on /recommend
+        (
+            "/recommend",
+            {
+                "Consumed": 500.0,
+                "Temp": 440.0,
+                "Quench": 73.0,
+                "Month": "1",
+                "Blend": "284",
+                "target_agtron": 60.0,
+            },
+            "target_agtron",
+        ),
+    ],
+)
+def test_soft_ood_inputs_return_200_with_warning_flags(
+    client: TestClient,
+    endpoint: str,
+    ood_payload: dict,
+    expected_ood_feature: str,
+) -> None:
+    """Valid inputs outside 1st–99th training percentiles or minimum blend support should return 200 with is_ood=True."""
+    response = client.post(endpoint, json=ood_payload)
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["is_ood"] is True
+    assert expected_ood_feature in data["ood_features"]
+    assert len(data["ood_warnings"]) >= 1
+
+
+def test_predict_schedules_supabase_telemetry_background_task(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /predict should asynchronously forward prediction and OOD telemetry to Supabase when configured."""
+    captured_requests: list[tuple[str, dict, dict]] = []
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class DummyClient:
+        async def post(self, url: str, *, headers: dict, json: dict) -> DummyResponse:
+            captured_requests.append((url, headers, json))
+            return DummyResponse()
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example-project.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", "test-supabase-key")
+    monkeypatch.setattr(client.app.state, "http_client", DummyClient(), raising=False)
+
+    payload = {
+        "Consumed": 250.0,
+        "Temp": 440.0,
+        "Quench": 73.0,
+        "Month": "1",
+        "Blend": "284",
+    }
+    response = client.post("/predict", json=payload)
+    assert response.status_code == 200
+
+    assert len(captured_requests) == 1
+    url, headers, row = captured_requests[0]
+    assert url == "https://example-project.supabase.co/rest/v1/prediction_logs"
+    assert headers["apikey"] == "test-supabase-key"
+    assert headers["Authorization"] == "Bearer test-supabase-key"
+    assert row["endpoint"] == "/predict"
+    assert row["consumed"] == 250.0
+    assert row["is_ood"] is True
+    assert "Consumed" in row["ood_features"]
+    assert isinstance(row["latency_ms"], float)

@@ -24,6 +24,7 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     MODEL_PATH=models/agtron_model.cbm \
+    FEATURE_BOUNDS_PATH=models/feature_bounds.json \
     PREDICTION_LOG_PATH=logs/predictions.jsonl
 
 # Copy installed packages from builder stage
