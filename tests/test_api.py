@@ -119,6 +119,17 @@ def test_recommend_happy_path(client: TestClient) -> None:
     assert top_recs[0]["temp"] == data["recommended_temp"]
     assert top_recs[0]["quench"] == data["recommended_quench"]
 
+    assert data["candidates_evaluated"] == 231
+    assert data["inference_latency_ms"] >= 0.0
+    assert data["compute_latency_ms"] >= data["inference_latency_ms"]
+    assert data["total_latency_ms"] >= data["compute_latency_ms"]
+
+    assert "server-timing" in response.headers
+    assert "inference;dur=" in response.headers["server-timing"]
+    assert "compute;dur=" in response.headers["server-timing"]
+    assert "x-inference-time-ms" in response.headers
+    assert "x-compute-time-ms" in response.headers
+
 
 @pytest.mark.parametrize(
     "endpoint,invalid_payload",

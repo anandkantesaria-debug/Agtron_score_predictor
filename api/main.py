@@ -589,6 +589,22 @@ class RecommendationResponse(BaseModel):
         ...,
         description="Top 5 candidate settings ranked by smallest distance from target.",
     )
+    candidates_evaluated: int = Field(
+        ...,
+        description="Total number of (Temp, Quench) candidate combinations scored in batch.",
+    )
+    inference_latency_ms: float = Field(
+        ...,
+        description="Pure vectorized CatBoost batch prediction time in milliseconds.",
+    )
+    compute_latency_ms: float = Field(
+        ...,
+        description="Grid generation, DataFrame construction, batch inference, and ranking time in milliseconds.",
+    )
+    total_latency_ms: float = Field(
+        ...,
+        description="Total server-side handler execution time in milliseconds.",
+    )
     model_version: str = Field(
         ..., description="Model version/hash used for inference."
     )
@@ -681,7 +697,9 @@ def predict_agtron(payload: RoastInput, request: Request) -> PredictionResponse:
 
 
 @app.post("/recommend", response_model=RecommendationResponse, tags=["Inference"])
-def recommend_settings(payload: RoastInput, request: Request) -> RecommendationResponse:
+def recommend_settings(
+    payload: RoastInput, request: Request, response: Response
+) -> RecommendationResponse:
     """Recommend optimal temperature and quench adjustments to hit a target Agtron score."""
     start_time = time.perf_counter()
     model, model_version = _get_loaded_model(request)
@@ -690,6 +708,8 @@ def recommend_settings(payload: RoastInput, request: Request) -> RecommendationR
     current_prediction = float(model.predict(input_df)[0])
     target = float(payload.target_agtron)
     gap = target - current_prediction
+
+    compute_start = time.perf_counter()
 
     temp_changes = list(range(-11, 10))
     quench_changes = list(range(-6, 5))
@@ -713,7 +733,10 @@ def recommend_settings(payload: RoastInput, request: Request) -> RecommendationR
         }
     )
 
+    inference_start = time.perf_counter()
     candidate_predictions = model.predict(candidate_df)
+    inference_end = time.perf_counter()
+
     candidate_errors = [abs(target - float(pred)) for pred in candidate_predictions]
 
     recommendation_df = (
@@ -740,18 +763,36 @@ def recommend_settings(payload: RoastInput, request: Request) -> RecommendationR
         for _, row in recommendation_df.head(5).iterrows()
     ]
 
-    latency_ms = (time.perf_counter() - start_time) * 1000.0
+    compute_end = time.perf_counter()
+
+    prep_latency_ms = round((inference_start - compute_start) * 1000.0, 3)
+    inference_latency_ms = round((inference_end - inference_start) * 1000.0, 3)
+    compute_latency_ms = round((compute_end - compute_start) * 1000.0, 3)
+    total_latency_ms = round((compute_end - start_time) * 1000.0, 3)
+
+    response.headers["Server-Timing"] = (
+        f"prep;dur={prep_latency_ms}, "
+        f"inference;dur={inference_latency_ms}, "
+        f"compute;dur={compute_latency_ms}, "
+        f"total;dur={total_latency_ms}"
+    )
+    response.headers["X-Inference-Time-Ms"] = str(inference_latency_ms)
+    response.headers["X-Compute-Time-Ms"] = str(compute_latency_ms)
+
     log_prediction_record(
         endpoint="/recommend",
         payload=payload,
         predicted_agtron=current_prediction,
         model_version=model_version,
-        latency_ms=latency_ms,
+        latency_ms=total_latency_ms,
         extra_fields={
             "target_agtron": round(target, 2),
             "recommended_temp": float(best_row["Temp"]),
             "recommended_quench": float(best_row["Quench"]),
             "expected_agtron": float(best_row["Expected Agtron"]),
+            "candidates_evaluated": n_candidates,
+            "inference_latency_ms": inference_latency_ms,
+            "compute_latency_ms": compute_latency_ms,
         },
     )
 
@@ -764,5 +805,9 @@ def recommend_settings(payload: RoastInput, request: Request) -> RecommendationR
         expected_agtron=float(best_row["Expected Agtron"]),
         distance_from_target=float(best_row["Error"]),
         top_recommendations=top_candidates,
+        candidates_evaluated=n_candidates,
+        inference_latency_ms=inference_latency_ms,
+        compute_latency_ms=compute_latency_ms,
+        total_latency_ms=total_latency_ms,
         model_version=model_version,
     )
